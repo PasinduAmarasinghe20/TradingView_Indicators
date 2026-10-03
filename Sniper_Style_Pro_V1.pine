@@ -1,0 +1,222 @@
+//@version=6
+indicator("Sniper-Style Pro Signals V1", overlay=true, max_lines_count=100, max_labels_count=500)
+
+// ============================================================
+// Sniper-Style Pro V1
+// Visual recreation of the supplied screenshots.
+// IMPORTANT: The original "SNIPER PRO" calculation is proprietary/unknown.
+// This script uses a transparent EMA + RSI + ATR ruleset instead.
+// ============================================================
+
+// ---------- Inputs ----------
+groupSignal = "Signal Engine"
+fastLen     = input.int(9,  "Fast EMA", minval=1, group=groupSignal)
+slowLen     = input.int(21, "Slow EMA", minval=2, group=groupSignal)
+rsiLen      = input.int(14, "RSI Length", minval=2, group=groupSignal)
+rsiBull     = input.float(52, "Bullish RSI threshold", minval=1, maxval=99, group=groupSignal)
+rsiBear     = input.float(48, "Bearish RSI threshold", minval=1, maxval=99, group=groupSignal)
+useTrend    = input.bool(true, "Require EMA trend alignment", group=groupSignal)
+
+groupRisk   = "Risk / Targets"
+atrLen      = input.int(14, "ATR Length", minval=1, group=groupRisk)
+slATR       = input.float(1.25, "Stop distance (ATR)", minval=0.1, step=0.05, group=groupRisk)
+tp1R        = input.float(1.0, "TP1 (R)", minval=0.1, step=0.1, group=groupRisk)
+tp2R        = input.float(2.0, "TP2 (R)", minval=0.1, step=0.1, group=groupRisk)
+tp3R        = input.float(3.0, "TP3 (R)", minval=0.1, step=0.1, group=groupRisk)
+
+groupMTF    = "Top Trend Panel"
+tf1         = input.timeframe("5",  "Trend TF 1", group=groupMTF)
+tf2         = input.timeframe("15", "Trend TF 2", group=groupMTF)
+tf3         = input.timeframe("30", "Trend TF 3", group=groupMTF)
+tf4         = input.timeframe("60", "Trend TF 4", group=groupMTF)
+
+groupVisual = "Visuals"
+showEMAs    = input.bool(false, "Show EMAs", group=groupVisual)
+showPanel   = input.bool(true, "Show Bullish/Bearish panel", group=groupVisual)
+showStats   = input.bool(true, "Show Wins/Losses box", group=groupVisual)
+showLevels  = input.bool(true, "Show Entry / SL / TP levels", group=groupVisual)
+showSignal  = input.bool(true, "Show BUY / SELL signals", group=groupVisual)
+
+// ---------- Core calculations ----------
+fast = ta.ema(close, fastLen)
+slow = ta.ema(close, slowLen)
+rsi  = ta.rsi(close, rsiLen)
+atr  = ta.atr(atrLen)
+
+bullTrend = fast > slow
+bearTrend = fast < slow
+
+buySignal  = barstate.isconfirmed and ta.crossover(fast, slow) and rsi >= rsiBull and (not useTrend or bullTrend)
+sellSignal = barstate.isconfirmed and ta.crossunder(fast, slow) and rsi <= rsiBear and (not useTrend or bearTrend)
+
+// ---------- Optional EMA plots ----------
+plot(showEMAs ? fast : na, "Fast EMA", color=color.new(color.teal, 0), linewidth=2)
+plot(showEMAs ? slow : na, "Slow EMA", color=color.new(color.red, 0), linewidth=2)
+
+// ---------- MTF trend ----------
+trendFor(tf) =>
+    request.security(syminfo.tickerid, tf, ta.ema(close, fastLen) > ta.ema(close, slowLen), barmerge.gaps_off, barmerge.lookahead_off)
+
+t1 = trendFor(tf1)
+t2 = trendFor(tf2)
+t3 = trendFor(tf3)
+t4 = trendFor(tf4)
+
+// ---------- Trade state ----------
+var int   tradeDir   = 0       // 1 = long, -1 = short, 0 = flat
+var float entryPrice = na
+var float stopPrice  = na
+var float tp1Price   = na
+var float tp2Price   = na
+var float tp3Price   = na
+var bool  tp1Hit     = false
+var bool  tp2Hit     = false
+var bool  tp3Hit     = false
+
+var int wins = 0
+var int losses = 0
+
+// Drawn objects for the currently active signal.
+var line entryLine = na
+var line slLine    = na
+var line tp1Line   = na
+var line tp2Line   = na
+var line tp3Line   = na
+var label entryLbl = na
+var label slLbl    = na
+var label tp1Lbl   = na
+var label tp2Lbl   = na
+var label tp3Lbl   = na
+
+deleteTradeObjects() =>
+    if not na(entryLine)
+        line.delete(entryLine)
+    if not na(slLine)
+        line.delete(slLine)
+    if not na(tp1Line)
+        line.delete(tp1Line)
+    if not na(tp2Line)
+        line.delete(tp2Line)
+    if not na(tp3Line)
+        line.delete(tp3Line)
+    if not na(entryLbl)
+        label.delete(entryLbl)
+    if not na(slLbl)
+        label.delete(slLbl)
+    if not na(tp1Lbl)
+        label.delete(tp1Lbl)
+    if not na(tp2Lbl)
+        label.delete(tp2Lbl)
+    if not na(tp3Lbl)
+        label.delete(tp3Lbl)
+
+// ---------- Open a new simulated trade ----------
+if buySignal or sellSignal
+    // Close/replace any existing simulated trade.
+    if tradeDir != 0
+        tradeDir := 0
+    deleteTradeObjects()
+
+    tradeDir    := buySignal ? 1 : -1
+    entryPrice  := close
+    riskDist    = atr * slATR
+
+    stopPrice := tradeDir == 1 ? entryPrice - riskDist : entryPrice + riskDist
+    tp1Price  := tradeDir == 1 ? entryPrice + riskDist * tp1R : entryPrice - riskDist * tp1R
+    tp2Price  := tradeDir == 1 ? entryPrice + riskDist * tp2R : entryPrice - riskDist * tp2R
+    tp3Price  := tradeDir == 1 ? entryPrice + riskDist * tp3R : entryPrice - riskDist * tp3R
+
+    tp1Hit := false
+    tp2Hit := false
+    tp3Hit := false
+
+    if showLevels
+        entryLine := line.new(bar_index, entryPrice, bar_index + 1, entryPrice, extend=extend.right, color=color.gray, width=2)
+        slLine    := line.new(bar_index, stopPrice,  bar_index + 1, stopPrice,  extend=extend.right, color=color.rgb(210, 0, 70), style=line.style_dotted, width=3)
+        tp1Line   := line.new(bar_index, tp1Price,   bar_index + 1, tp1Price,   extend=extend.right, color=color.rgb(0, 145, 210), style=line.style_dotted, width=3)
+        tp2Line   := line.new(bar_index, tp2Price,   bar_index + 1, tp2Price,   extend=extend.right, color=color.rgb(0, 145, 210), style=line.style_dotted, width=3)
+        tp3Line   := line.new(bar_index, tp3Price,   bar_index + 1, tp3Price,   extend=extend.right, color=color.rgb(0, 145, 210), style=line.style_dotted, width=3)
+
+        entryLbl := label.new(bar_index + 1, entryPrice, (tradeDir == 1 ? "BUY: " : "SELL: ") + str.tostring(entryPrice, format.mintick), style=label.style_label_left, color=tradeDir == 1 ? color.rgb(0, 210, 150) : color.rgb(220, 0, 70), textcolor=color.white, size=size.normal)
+        slLbl    := label.new(bar_index + 1, stopPrice, "SL: " + str.tostring(stopPrice, format.mintick), style=label.style_label_left, color=color.rgb(220, 0, 70), textcolor=color.white, size=size.normal)
+        tp1Lbl   := label.new(bar_index + 1, tp1Price, "TP1: " + str.tostring(tp1Price, format.mintick), style=label.style_label_left, color=color.rgb(0, 145, 220), textcolor=color.white, size=size.normal)
+        tp2Lbl   := label.new(bar_index + 1, tp2Price, "TP2: " + str.tostring(tp2Price, format.mintick), style=label.style_label_left, color=color.rgb(0, 145, 220), textcolor=color.white, size=size.normal)
+        tp3Lbl   := label.new(bar_index + 1, tp3Price, "TP3: " + str.tostring(tp3Price, format.mintick), style=label.style_label_left, color=color.rgb(0, 145, 220), textcolor=color.white, size=size.normal)
+
+// ---------- Manage active trade ----------
+// Conservative rule when a candle touches both SL and TP: count SL first.
+if tradeDir == 1
+    if low <= stopPrice
+        losses += 1
+        tradeDir := 0
+    else
+        if not tp1Hit and high >= tp1Price
+            tp1Hit := true
+        if not tp2Hit and high >= tp2Price
+            tp2Hit := true
+        if not tp3Hit and high >= tp3Price
+            tp3Hit := true
+            wins += 1
+            tradeDir := 0
+
+if tradeDir == -1
+    if high >= stopPrice
+        losses += 1
+        tradeDir := 0
+    else
+        if not tp1Hit and low <= tp1Price
+            tp1Hit := true
+        if not tp2Hit and low <= tp2Price
+            tp2Hit := true
+        if not tp3Hit and low <= tp3Price
+            tp3Hit := true
+            wins += 1
+            tradeDir := 0
+
+// Update active labels so they stay at the newest candle.
+if tradeDir != 0 and showLevels
+    if not na(entryLbl)
+        label.set_x(entryLbl, bar_index + 1)
+    if not na(slLbl)
+        label.set_x(slLbl, bar_index + 1)
+    if not na(tp1Lbl)
+        label.set_x(tp1Lbl, bar_index + 1)
+        label.set_text(tp1Lbl, "TP1: " + str.tostring(tp1Price, format.mintick) + (tp1Hit ? "  ✓" : ""))
+    if not na(tp2Lbl)
+        label.set_x(tp2Lbl, bar_index + 1)
+        label.set_text(tp2Lbl, "TP2: " + str.tostring(tp2Price, format.mintick) + (tp2Hit ? "  ✓" : ""))
+    if not na(tp3Lbl)
+        label.set_x(tp3Lbl, bar_index + 1)
+        label.set_text(tp3Lbl, "TP3: " + str.tostring(tp3Price, format.mintick) + (tp3Hit ? "  ✓" : ""))
+
+// ---------- Signal markers ----------
+plotshape(showSignal and buySignal,  title="BUY",  style=shape.labelup,   location=location.belowbar, color=color.rgb(0, 210, 150), text="BUY",  textcolor=color.white, size=size.small)
+plotshape(showSignal and sellSignal, title="SELL", style=shape.labeldown, location=location.abovebar, color=color.rgb(220, 0, 70),  text="SELL", textcolor=color.white, size=size.small)
+
+// ---------- Top trend panel ----------
+var table trendTable = table.new(position.top_center, 4, 1, border_width=0)
+
+trendText(b) =>
+    b ? "Bullish" : "Bearish"
+
+trendColor(b) =>
+    b ? color.rgb(65, 170, 75) : color.rgb(205, 0, 45)
+
+if showPanel and barstate.islast
+    table.cell(trendTable, 0, 0, trendText(t1), bgcolor=trendColor(t1), text_color=color.white, text_size=size.normal)
+    table.cell(trendTable, 1, 0, trendText(t2), bgcolor=trendColor(t2), text_color=color.white, text_size=size.normal)
+    table.cell(trendTable, 2, 0, trendText(t3), bgcolor=trendColor(t3), text_color=color.white, text_size=size.normal)
+    table.cell(trendTable, 3, 0, trendText(t4), bgcolor=trendColor(t4), text_color=color.white, text_size=size.normal)
+
+// ---------- Win/Loss dashboard ----------
+var table statsTable = table.new(position.bottom_right, 2, 2, border_width=1)
+
+if showStats and barstate.islast
+    table.cell(statsTable, 0, 0, "SNIPER PRO V1", bgcolor=color.black, text_color=color.white, text_size=size.normal)
+    table.cell(statsTable, 1, 0, "", bgcolor=color.black)
+    table.cell(statsTable, 0, 1, "Wins: " + str.tostring(wins), bgcolor=color.rgb(0, 210, 80), text_color=color.white, text_size=size.normal)
+    table.cell(statsTable, 1, 1, "Losses: " + str.tostring(losses), bgcolor=color.rgb(210, 0, 35), text_color=color.white, text_size=size.normal)
+
+// ---------- Alerts ----------
+alertcondition(buySignal,  title="Sniper BUY",  message="Sniper-Style V1 BUY signal on {{ticker}} {{interval}}")
+alertcondition(sellSignal, title="Sniper SELL", message="Sniper-Style V1 SELL signal on {{ticker}} {{interval}}")
